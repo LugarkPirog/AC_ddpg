@@ -159,7 +159,10 @@ class Critic(Network):
 
 
 class DDPG:
-    def __init__(self, max_buffer_len, batch_size, action_dim=40, start_train_at=100, test_verbose=10):
+    # TODO: Add Tensorboard support and model saving
+    def __init__(self, max_buffer_len, batch_size, action_dim=40,
+                 start_train_at=100, test_verbose=10, save_model_every=25,
+                 savedir='./DDPG/model/', logdir='./DDPG/logs'):
         self._start = start_train_at
         self.test_verbose = test_verbose
         self.sess = tf.Session()
