@@ -1,7 +1,9 @@
 import tensorflow as tf
 import numpy as np
 from collections import deque
+import random
 
+# TODO: add noise reduction
 
 class ReplayBuffer:
     def __init__(self, max_len=256):
@@ -13,16 +15,16 @@ class ReplayBuffer:
         return len(self.buffer)
 
     def add(self, state, action, reward):
-        self.buffer.append((state, action, reward))
+        self.buffer.extend((triplet for triplet in zip(state, action, reward)))
 
     def sample(self, num):
-        return np.random.choice(self.buffer, num, replace=False)
+        return random.sample(self.buffer, num)
 
     def clear(self):
         self.buffer = deque(maxlen=self.__maxlen)
 
 class OUNoise:
-    def __init__(self, action_dim, mu=0., theta=.2, sigma=.2, seed=None):
+    def __init__(self, action_dim, mu=0., theta=.17, sigma=.3, seed=None):
         self.mu = mu
         self.theta = theta
         self.sigma = sigma
@@ -51,7 +53,7 @@ class Network:
 
 
 class Actor(Network):
-    def __init__(self, sess, name, state_dim, act_dim, l1_s, l2_s):
+    def __init__(self, sess, name, state_dim, act_dim, l1_s, l2_s, learning_rate):
         super().__init__(sess, name, state_dim, act_dim)
 
         self.input,\
@@ -59,7 +61,7 @@ class Actor(Network):
         self.vars = self.create_network(l1_s, l2_s)
 
         self.q_grad_input,\
-        self.update_step = self.create_updater()
+        self.update_step = self.create_updater(learning_rate)
 
         # self.sess.run(tf.global_variables_initializer())
 
@@ -84,21 +86,22 @@ class Actor(Network):
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
         return inp, out_actions, net
 
-    def create_updater(self):
+    def create_updater(self, lr):
         q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim], name='q_grad_in')
-        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp, name='q_grads')
-        opt_step = tf.train.AdamOptimizer(1e-3).apply_gradients(zip(net_grads, self.vars))
+        net_grads = tf.gradients(self.actions, self.vars, -q_grad_inp, name='q_grads')
+        opt_step = tf.train.AdamOptimizer(lr).apply_gradients(zip(net_grads, self.vars))
         return q_grad_inp, opt_step
 
     def get_actions(self, input_states):
         return self.sess.run(self.actions, feed_dict={self.input:input_states})
 
-    def apply_grads(self, grads, states):
-        self.sess.run(self.update_step, feed_dict={self.q_grad_input:grads, self.input:states})
+    def apply_grads(self, grads, states, error):
+        g = grads[0]*np.sign(error)
+        self.sess.run(self.update_step, feed_dict={self.q_grad_input: g, self.input: states})
 
 
 class Critic(Network):
-    def __init__(self, sess, name, state_dim, act_dim, l1_size, l2_size):
+    def __init__(self, sess, name, state_dim, act_dim, l1_size, l2_size, learning_rate):
         super().__init__(sess, name, state_dim, act_dim)
 
         self.state_input,\
@@ -109,7 +112,7 @@ class Critic(Network):
 
         self.q_target,\
         self.loss,\
-        self.update_step = self.create_updater()
+        self.update_step = self.create_updater(learning_rate)
 
         # self.sess.run(tf.global_variables_initializer())
 
@@ -132,14 +135,14 @@ class Critic(Network):
             l2 = tf.nn.relu(tf.matmul(l1, w2) + tf.matmul(action_input, w2_act) + b2)
             q_value = tf.identity(tf.matmul(l2, w3) + b3, name='q_value')
 
-            action_gradients = tf.gradients(q_value, action_input,name='action_grads')
+            action_gradients = tf.gradients(q_value, action_input, name='action_grads')
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
         return state_inp, action_input, q_value, action_gradients, net
 
-    def create_updater(self):
+    def create_updater(self, lr):
         q_target = tf.placeholder(tf.float32, [None, 1], name='q_target')
-        loss = tf.reduce_mean(tf.square(q_target - self.q_value),name='critic_loss')
-        update_step = tf.train.AdamOptimizer(1e-3).minimize(loss)
+        loss = tf.reduce_mean(tf.square(q_target - self.q_value), name='critic_loss')
+        update_step = tf.train.AdamOptimizer(lr).minimize(loss)
         return q_target, loss, update_step
 
     def update(self, reward, states, actions):
@@ -152,14 +155,15 @@ class Critic(Network):
                                                       self.action_input:actions})
 
     def get_act_grads(self, states, actions):
-        return self.sess.run(self.action_grads, feed_dice={self.state_input:states,
+        return self.sess.run(self.action_grads, feed_dict={self.state_input:states,
                                                            self.action_input:actions})
 
 
 class DDPG:
     def __init__(self, max_buffer_len, batch_size, action_dim=60, state_dim=32,
+                 noise_theta=.17, noise_sigma=.3, actor_lr=1e-4, critic_lr=1e-3,
                  start_train_at=100, test_verbose=10, save_model_every=25,
-                 savedir='./DDPG/model/', logdir='./DDPG/logs', load=False, name='ddpg'):
+                 savedir='./DDPG/model/', logdir='./DDPG/logs', name='ddpg'):
         self._start = start_train_at
         self.test_verbose = test_verbose
         self.sess = tf.Session()
@@ -171,9 +175,9 @@ class DDPG:
         # self.logdir = logdir
 
         self.actor = Actor(self.sess, 'actor', state_dim=state_dim,
-                           act_dim=action_dim, l1_s=64, l2_s=128)
+                           act_dim=action_dim, l1_s=64, l2_s=128, learning_rate=actor_lr)
         self.critic = Critic(self.sess, 'critic', state_dim=state_dim,
-                             act_dim=action_dim, l1_size=64, l2_size=64)
+                             act_dim=action_dim, l1_size=64, l2_size=64, learning_rate=critic_lr)
 
         for var in tf.trainable_variables():
             tf.summary.histogram(var.name[:-2], var)
@@ -183,25 +187,20 @@ class DDPG:
         self.summary_writer = tf.summary.FileWriter(logdir)
         self.summary_writer.add_graph(self.sess.graph)
         self.sess.run(tf.global_variables_initializer())
-
-        if load:
-            self.load_model()
-            # TODO: somehow get the global_step from checkpoint
-
         self.buffer = ReplayBuffer(max_buffer_len)
-        self.noize = OUNoise(action_dim)
+        self.noize = OUNoise(action_dim, theta=noise_theta, sigma=noise_sigma)
 
     def train(self):
         train_batch = np.array(self.buffer.sample(self.bs))
-        states = train_batch[:, 0]
-        actions = train_batch[:, 1]
-        rewards = train_batch[:, 2]
+        states = np.array(train_batch[:, 0].tolist())
+        actions = np.array(train_batch[:, 1].tolist())
+        rewards = train_batch[:, 2].reshape((-1, 1))
 
         self.critic.update(rewards, states, actions)
 
         actions_new = self.actor.get_actions(states)
         q_grads = self.critic.get_act_grads(states, actions_new)
-        self.actor.apply_grads(q_grads, states)
+        self.actor.apply_grads(q_grads, states, np.mean(rewards))
 
     def noised_actions(self, states):
         return self.actions(states) + self.noize.poshumim()
