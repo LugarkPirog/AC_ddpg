@@ -1,7 +1,6 @@
 import tensorflow as tf
 import numpy as np
 from collections import deque
-#import tf.contrib.rnn.LSTMStateTuple as LSTMStateTuple
 
 
 class ReplayBuffer:
@@ -67,7 +66,7 @@ class Actor(Network):
     def create_network(self, l1_size, l2_size):
 
         with tf.variable_scope(self.name):
-            inp = tf.placeholder(tf.float32, (None, self.state_dim), name='input')
+            inp = tf.placeholder(tf.float32, (None, self.state_dim), name='state_input')
             with tf.variable_scope('l1'):
                 w1 = tf.get_variable('w', (self.state_dim, l1_size))
                 b1 = tf.Variable(tf.zeros((l1_size,)), name='b')
@@ -80,14 +79,14 @@ class Actor(Network):
 
             l1 = tf.nn.relu(tf.matmul(inp, w1) + b1)
             l2 = tf.nn.relu(tf.matmul(l1, w2) + b2)
-            out_actions = tf.nn.tanh(tf.matmul(l2, w3) + b3)
+            out_actions = tf.nn.tanh(tf.matmul(l2, w3) + b3, name='out_actions')
 
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
         return inp, out_actions, net
 
     def create_updater(self):
-        q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim])
-        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp)
+        q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim], name='q_grad_in')
+        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp, name='q_grads')
         opt_step = tf.train.AdamOptimizer(1e-3).apply_gradients(zip(net_grads, self.vars))
         return q_grad_inp, opt_step
 
@@ -118,7 +117,7 @@ class Critic(Network):
     def create_network(self, l1_size, l2_size):
         with tf.variable_scope(self.name):
             state_inp = tf.placeholder(tf.float32, [None, self.state_dim], name='state_input')
-            action_input = tf.placeholder(tf.float32, [None, self.act_dim])
+            action_input = tf.placeholder(tf.float32, [None, self.act_dim], name='action_input')
             with tf.variable_scope('l1'):
                 w1 = tf.get_variable('w1', (self.state_dim, l1_size))
                 b1 = tf.Variable(tf.zeros([l1_size,]), name='b')
@@ -132,15 +131,15 @@ class Critic(Network):
 
             l1 = tf.nn.relu(tf.matmul(state_inp, w1) + b1)
             l2 = tf.nn.relu(tf.matmul(l1, w2) + tf.matmul(action_input, w2_act) + b2)
-            q_value = tf.identity(tf.matmul(l2, w3) + b3)
+            q_value = tf.identity(tf.matmul(l2, w3) + b3, name='q_value')
 
-            action_gradients = tf.gradients(q_value, action_input)
+            action_gradients = tf.gradients(q_value, action_input,name='action_grads')
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
         return state_inp, action_input, q_value, action_gradients, net
 
     def create_updater(self):
-        q_target = tf.placeholder(tf.float32, [None, 1])
-        loss = tf.reduce_mean(tf.square(q_target - self.q_value))
+        q_target = tf.placeholder(tf.float32, [None, 1], name='q_target')
+        loss = tf.reduce_mean(tf.square(q_target - self.q_value),name='critic_loss')
         update_step = tf.train.AdamOptimizer(1e-3).minimize(loss)
         return q_target, loss, update_step
 
@@ -159,22 +158,36 @@ class Critic(Network):
 
 
 class DDPG:
-    # TODO: Add Tensorboard support and model saving
-    def __init__(self, max_buffer_len, batch_size, action_dim=40,
+    def __init__(self, max_buffer_len, batch_size, action_dim=60, state_dim=32,
                  start_train_at=100, test_verbose=10, save_model_every=25,
-                 savedir='./DDPG/model/', logdir='./DDPG/logs'):
+                 savedir='./DDPG/model/', logdir='./DDPG/logs', load=False, name='ddpg'):
         self._start = start_train_at
         self.test_verbose = test_verbose
         self.sess = tf.Session()
         self.bs = batch_size
         self.gs = 0  # global step
+        self.name = name
+        self.savedir = savedir + self.name
+        self.save_model_every = save_model_every
+        # self.logdir = logdir
 
-        self.actor = Actor(self.sess, 'actor', state_dim=32,
+        self.actor = Actor(self.sess, 'actor', state_dim=state_dim,
                            act_dim=action_dim, l1_s=64, l2_s=128)
-        self.critic = Critic(self.sess, 'critic', state_dim=32,
+        self.critic = Critic(self.sess, 'critic', state_dim=state_dim,
                              act_dim=action_dim, l1_size=64, l2_size=64)
 
+        for var in tf.trainable_variables():
+            tf.summary.histogram(var.name[:-2], var)
+
+        self.__summary = tf.summary.merge_all()
+        self.saver = tf.train.Saver()
+        self.summary_writer = tf.summary.FileWriter(logdir)
+        self.summary_writer.add_graph(self.sess.graph)
         self.sess.run(tf.global_variables_initializer())
+
+        if load:
+            self.load_model()
+            # TODO: somehow get the global_step from checkpoint
 
         self.buffer = ReplayBuffer(max_buffer_len)
         self.noize = OUNoise(action_dim)
@@ -205,8 +218,23 @@ class DDPG:
         self.train()
 
         if self.gs % self.test_verbose == self.test_verbose - 1:
-            pass
+            self.write_summary()
+        if self.gs % self.save_model_every == self.save_model_every - 1:
+            self.save_model()
+
+    def save_model(self):
+        self.saver.save(self.sess, self.savedir)
+
+    def load_model(self):
+        self.saver.restore(self.sess, self.savedir)
+
+    def write_summary(self):
+        self.summary_writer.add_summary(self.__summary, self.gs)
+
 
 
 if __name__ == '__main__':
     agent = DDPG(100, 16, 40)
+    agent.save_model()
+    agent.load_model()
+    print(len(tf.trainable_variables()))
