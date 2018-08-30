@@ -228,12 +228,12 @@ class DDPG:
         self.saver.restore(self.sess, self.savedir)
 
     def write_summary(self):
-        self.summary_writer.add_summary(self.__summary, self.gs)
+        s = self.sess.run(self.__summary)
+        self.summary_writer.add_summary(s, self.gs)
 
 
 
 if __name__ == '__main__':
     agent = DDPG(100, 16, 40)
-    agent.save_model()
-    agent.load_model()
+    agent.write_summary()
     print(len(tf.trainable_variables()))
