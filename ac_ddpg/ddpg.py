@@ -116,7 +116,7 @@ class Actor(Network):
 
     def create_updater(self, lr):
         q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim], name='q_grad_in')
-        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp, name='q_grads')
+        net_grads = tf.gradients(self.actions, self.vars, - q_grad_inp, name='q_grads')
         opt_step = tf.train.AdamOptimizer(lr).apply_gradients(zip(net_grads, self.vars))
         return q_grad_inp, opt_step
 
