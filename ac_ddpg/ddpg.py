@@ -3,7 +3,6 @@ import numpy as np
 from collections import deque
 import random
 
-# TODO: add noise reduction
 
 class ReplayBuffer:
     def __init__(self, max_len=256):
@@ -24,21 +23,20 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=self.__maxlen)
 
 class OUNoise:
-    def __init__(self, action_dim, mu=0., theta=.17, sigma=.3, seed=None):
+    def __init__(self, action_dim, mu=0., theta=.17, sigma=.3):
         self.mu = mu
         self.theta = theta
         self.sigma = sigma
         self.act_dim = action_dim
         self.state = np.ones(self.act_dim) * self.mu
-        if seed is not None:
-            np.random.seed(seed)
 
     def reset(self):
         self.state = np.ones(self.act_dim)*self.mu
 
     def poshumim(self):
-        dx = self.theta*(self.mu - self.state) + self.sigma*np.random.randn(len(self.state))
-        self.state += dx
+        x = self.state
+        dx = self.theta*(self.mu - x) + self.sigma*np.random.randn(self.act_dim)
+        self.state = x + dx
         return self.state
 
 
@@ -53,9 +51,9 @@ class Network:
 
 
 class Actor(Network):
-    def __init__(self, sess, name, state_dim, act_dim, l1_s, l2_s, learning_rate):
+    def __init__(self, sess, name, state_dim, act_dim, l1_s, l2_s, learning_rate, ema_decay=.99):
         super().__init__(sess, name, state_dim, act_dim)
-
+        self.ema_decay = ema_decay
         self.input,\
         self.actions,\
         self.vars = self.create_network(l1_s, l2_s)
@@ -63,7 +61,14 @@ class Actor(Network):
         self.q_grad_input,\
         self.update_step = self.create_updater(learning_rate)
 
-        # self.sess.run(tf.global_variables_initializer())
+        self.t_state_in,\
+        self.t_actions,\
+        self.t_upd,\
+        self.t_vars = self.create_target_net()
+
+        self.sess.run(tf.global_variables_initializer())
+
+        self.update_target()
 
     def create_network(self, l1_size, l2_size):
 
@@ -86,35 +91,63 @@ class Actor(Network):
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
         return inp, out_actions, net
 
+    def create_target_net(self):
+        with tf.name_scope(self.name+'_shadow'):
+            state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_input')
+            ema = tf.train.ExponentialMovingAverage(decay=self.ema_decay)
+            target_upd = ema.apply(self.vars)
+            target_vars = [ema.average(x) for x in self.vars]
+
+            l1 = tf.nn.relu(tf.matmul(state_in, target_vars[0]) + target_vars[1])
+            l2 = tf.nn.relu(tf.matmul(l1, target_vars[2]) + target_vars[3])
+            out = tf.nn.sigmoid(tf.matmul(l2, target_vars[4]) + target_vars[5])
+
+        return state_in, out, target_upd, target_vars
+
+    def update_target(self):
+        self.sess.run(self.t_upd)
+
     def create_updater(self, lr):
         q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim], name='q_grad_in')
-        net_grads = tf.gradients(self.actions, self.vars, -q_grad_inp, name='q_grads')
+        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp, name='q_grads')
         opt_step = tf.train.AdamOptimizer(lr).apply_gradients(zip(net_grads, self.vars))
         return q_grad_inp, opt_step
 
     def get_actions(self, input_states):
         return self.sess.run(self.actions, feed_dict={self.input:input_states})
 
-    def apply_grads(self, grads, states, error):
-        g = grads[0]*np.sign(error)
+    def get_target_actions(self, input_states):
+        return self.sess.run(self.t_actions, feed_dict={self.t_state_in:input_states})
+
+    def apply_grads(self, grads, states):
+        g = grads[0]
         self.sess.run(self.update_step, feed_dict={self.q_grad_input: g, self.input: states})
 
 
 class Critic(Network):
-    def __init__(self, sess, name, state_dim, act_dim, l1_size, l2_size, learning_rate):
+    def __init__(self, sess, name, state_dim, act_dim, l1_size, l2_size, learning_rate, ema_decay=.99):
         super().__init__(sess, name, state_dim, act_dim)
 
+        self.ema_decay = ema_decay
         self.state_input,\
         self.action_input,\
         self.q_value,\
-        self.action_grads,\
         self.vars = self.create_network(l1_size, l2_size)
 
         self.q_target,\
         self.loss,\
+        self.action_grads,\
         self.update_step = self.create_updater(learning_rate)
 
-        # self.sess.run(tf.global_variables_initializer())
+        self.t_state_in, \
+        self.t_act_in, \
+        self.t_q_value, \
+        self.t_upd, \
+        self.t_vars = self.create_target_net()
+
+        self.sess.run(tf.global_variables_initializer())
+
+        self.update_target()
 
     def create_network(self, l1_size, l2_size):
         with tf.variable_scope(self.name):
@@ -135,15 +168,32 @@ class Critic(Network):
             l2 = tf.nn.relu(tf.matmul(l1, w2) + tf.matmul(action_input, w2_act) + b2)
             q_value = tf.identity(tf.matmul(l2, w3) + b3, name='q_value')
 
-            action_gradients = tf.gradients(q_value, action_input, name='action_grads')
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
-        return state_inp, action_input, q_value, action_gradients, net
+        return state_inp, action_input, q_value, net
+
+    def create_target_net(self):
+        with tf.name_scope(self.name+'_shadow'):
+            state_in = tf.placeholder(tf.float32, (None, self.state_dim), name='state_input')
+            act_in = tf.placeholder(tf.float32, (None, self.act_dim), name='action_input')
+            ema = tf.train.ExponentialMovingAverage(decay=self.ema_decay)
+            target_upd = ema.apply(self.vars)
+            target_vars = [ema.average(x) for x in self.vars]
+
+            l1 = tf.nn.relu(tf.matmul(state_in, target_vars[0]) + target_vars[1])
+            l2 = tf.nn.relu(tf.matmul(l1, target_vars[2]) + tf.matmul(act_in, target_vars[3]) + target_vars[4])
+            out = tf.identity(tf.matmul(l2, target_vars[5]) + target_vars[6])
+
+        return state_in, act_in, out, target_upd, target_vars
+
+    def update_target(self):
+        self.sess.run(self.t_upd)
 
     def create_updater(self, lr):
         q_target = tf.placeholder(tf.float32, [None, 1], name='q_target')
         loss = tf.reduce_mean(tf.square(q_target - self.q_value), name='critic_loss')
+        action_gradients = tf.gradients(loss, self.action_input, name='action_grads')
         update_step = tf.train.AdamOptimizer(lr).minimize(loss)
-        return q_target, loss, update_step
+        return q_target, loss, action_gradients, update_step
 
     def update(self, reward, states, actions):
         self.sess.run(self.update_step, feed_dict={self.q_target: reward,
@@ -154,9 +204,14 @@ class Critic(Network):
         return self.sess.run(self.q_value, feed_dict={self.state_input:states,
                                                       self.action_input:actions})
 
-    def get_act_grads(self, states, actions):
+    def get_target_q(self, states, actions):
+        return self.sess.run(self.t_q_value, feed_dict={self.t_state_in:states,
+                                                        self.t_act_in:actions})
+
+    def get_act_grads(self, states, actions, rewards):
         return self.sess.run(self.action_grads, feed_dict={self.state_input:states,
-                                                           self.action_input:actions})
+                                                           self.action_input:actions,
+                                                           self.q_target:rewards})
 
 
 class DDPG:
@@ -198,9 +253,12 @@ class DDPG:
 
         self.critic.update(rewards, states, actions)
 
-        actions_new = self.actor.get_actions(states)
-        q_grads = self.critic.get_act_grads(states, actions_new)
-        self.actor.apply_grads(q_grads, states, np.mean(rewards))
+        actions_new = self.actor.get_target_actions(states)
+        q_grads = self.critic.get_act_grads(states, actions_new, rewards)
+        self.actor.apply_grads(q_grads, states)
+
+        self.actor.update_target()
+        self.critic.update_target()
 
     def noised_actions(self, states):
         return self.actions(states) + self.noize.poshumim()
@@ -232,7 +290,23 @@ class DDPG:
 
 
 
-if __name__ == '__main__':
+if __name__ == '__main1__':
     agent = DDPG(100, 16, 40)
     agent.write_summary()
-    print(len(tf.trainable_variables()))
+    print(tf.trainable_variables(scope=agent.actor.name))
+
+if __name__ == '__main__':
+    ou = OUNoise(2, theta=.05, sigma=.05)
+    states = []
+
+    print(ou.poshumim())
+    print(ou.poshumim())
+    print(ou.poshumim())
+    print(ou.poshumim())
+    print(ou.poshumim())
+
+    for i in range(1000):
+        states.append(ou.poshumim())
+    import matplotlib.pyplot as plt
+    plt.plot(states)
+    plt.show()
