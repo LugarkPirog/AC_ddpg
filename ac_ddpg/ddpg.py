@@ -225,6 +225,7 @@ class Critic(Network):
 
 
 class DDPG:
+    # TODO: Add gradient masking
     def __init__(self, max_buffer_len, batch_size, action_dim=60, state_dim=32,
                  noise_theta=.17, noise_sigma=.3, noise_mu=.3, noise='normal', actor_lr=1e-4, critic_lr=1e-3,
                  start_train_at=100, test_verbose=10, save_model_every=25,
@@ -266,8 +267,8 @@ class DDPG:
 
         self.critic.update(rewards, states, actions)
 
-        actions_new = self.actor.get_actions(states)
-        q_grads = self.critic.get_act_grads(states, actions_new)
+        #actions_new = self.actor.get_actions(states)
+        q_grads = self.critic.get_act_grads(states, actions)
         self.actor.apply_grads(q_grads, states, rewards)
 
         self.actor.update_target()
