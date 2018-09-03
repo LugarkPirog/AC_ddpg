@@ -42,12 +42,15 @@ class OUNoise:
 
 
 class NormalNoise:
-    def __init__(self, action_dim, mu, *args):
+    def __init__(self, action_dim, mu, *args, decay=.99):
         self.mu = mu
         self.act_dim = action_dim
+        self.step = 0
+        self.decay = decay
 
     def poshumim(self):
-        return np.random.randn(self.act_dim) * self.mu
+        self.step += 1
+        return np.random.randn(self.act_dim) * (self.mu*(self.decay**(self.step-1)))
 
 
 class Network:
@@ -116,7 +119,7 @@ class Actor(Network):
 
     def create_updater(self, lr):
         q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim], name='q_grad_in')
-        net_grads = tf.gradients(self.actions, self.vars, - q_grad_inp, name='q_grads')
+        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp, name='q_grads')
         opt_step = tf.train.AdamOptimizer(lr).apply_gradients(zip(net_grads, self.vars))
         return q_grad_inp, opt_step
 
@@ -199,6 +202,7 @@ class Critic(Network):
         q_target = tf.placeholder(tf.float32, [None, 1], name='q_target')
         loss = tf.reduce_mean(tf.square(q_target - self.q_value), name='critic_loss')
         action_gradients = tf.gradients(self.q_value, self.action_input, name='action_grads')
+        tf.summary.histogram('action_grads', action_gradients)
         update_step = tf.train.AdamOptimizer(lr).minimize(loss)
         return q_target, loss, action_gradients, update_step
 
@@ -217,7 +221,7 @@ class Critic(Network):
 
     def get_act_grads(self, states, actions):
         return self.sess.run(self.action_grads, feed_dict={self.state_input: states,
-                                                           self.action_input: actions})
+                                                           self.action_input: actions}) * np.clip(np.mean(actions, axis=0),1e-6, 1.)
 
 
 class DDPG:
@@ -283,7 +287,7 @@ class DDPG:
         self.train()
 
         if self.gs % self.test_verbose == self.test_verbose - 1:
-            self.write_summary()
+            self.write_summary(states, actions)
         if self.gs % self.save_model_every == self.save_model_every - 1:
             self.save_model()
 
@@ -293,15 +297,10 @@ class DDPG:
     def load_model(self):
         self.saver.restore(self.sess, self.savedir)
 
-    def write_summary(self):
-        s = self.sess.run(self.__summary)
+    def write_summary(self, states, acts):
+        s = self.sess.run(self.__summary, feed_dict={self.critic.action_input:acts, self.critic.state_input:states})
         self.summary_writer.add_summary(s, self.gs)
 
-
-if __name__ == '__main1__':
-    agent = DDPG(100, 16, 40)
-    agent.write_summary()
-    print(tf.trainable_variables(scope=agent.actor.name))
 
 if __name__ == '__main__':
     ou = OUNoise(2, theta=.05, sigma=.05)
