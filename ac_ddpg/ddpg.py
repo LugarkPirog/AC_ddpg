@@ -5,6 +5,7 @@ import random
 
 
 class ReplayBuffer:
+    # TODO: Make prioritized
     def __init__(self, max_len=256):
         self.buffer = deque(maxlen=max_len)
         self.__maxlen = max_len
@@ -299,6 +300,7 @@ class DDPG:
         self.saver.restore(self.sess, self.savedir)
 
     def write_summary(self, states, acts):
+        # TODO: add grad split to visualize individual grad behaviour
         s = self.sess.run(self.__summary, feed_dict={self.critic.action_input:acts, self.critic.state_input:states})
         self.summary_writer.add_summary(s, self.gs)
 
