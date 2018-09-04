@@ -2,11 +2,10 @@ import tensorflow as tf
 import numpy as np
 from collections import deque
 import random
-
+import pickle
 
 class ReplayBuffer:
-    # TODO: Make prioritized
-    def __init__(self, max_len=256):
+    def __init__(self, max_len=5000):
         self.buffer = deque(maxlen=max_len)
         self.__maxlen = max_len
 
@@ -18,10 +17,17 @@ class ReplayBuffer:
         self.buffer.extend((triplet for triplet in zip(state, action, reward)))
 
     def sample(self, num):
+        # TODO: Make prioritized
         return random.sample(self.buffer, num)
 
     def clear(self):
         self.buffer = deque(maxlen=self.__maxlen)
+
+    def save(self, name='buffer', path='/home/user/Desktop/py/DDPG/buffer/'):
+        pickle.dump(self, open(path+name+'.pkl', 'wb'))
+
+    def load(self, name='buffer', path='/home/user/Desktop/py/DDPG/buffer/'):
+        return pickle.load(open(path+name+'pkl','rb'))
 
 
 class OUNoise:
@@ -131,14 +137,14 @@ class Actor(Network):
         return self.sess.run(self.t_actions, feed_dict={self.t_state_in: input_states})
 
     def apply_grads(self, grads, states, rewards):
-        g = grads[0] * np.sign(rewards)
+        g = grads[0] #* np.sign(rewards)
         self.sess.run(self.update_step, feed_dict={self.q_grad_input: g, self.input: states})
 
 
 class Critic(Network):
     def __init__(self, sess, name, state_dim, act_dim, l1_size, l2_size, learning_rate, ema_decay=.99):
         super().__init__(sess, name, state_dim, act_dim)
-
+        self.loss_display = 0.
         self.ema_decay = ema_decay
         self.state_input, \
         self.action_input, \
@@ -202,13 +208,14 @@ class Critic(Network):
     def create_updater(self, lr):
         q_target = tf.placeholder(tf.float32, [None, 1], name='q_target')
         loss = tf.reduce_mean(tf.square(q_target - self.q_value), name='critic_loss')
+        tf.summary.scalar('critic_loss', loss)
         action_gradients = tf.gradients(self.q_value, self.action_input, name='action_grads')
         tf.summary.histogram('action_grads', action_gradients)
         update_step = tf.train.AdamOptimizer(lr).minimize(loss)
         return q_target, loss, action_gradients, update_step
 
     def update(self, reward, states, actions):
-        self.sess.run(self.update_step, feed_dict={self.q_target: reward,
+        _, self.loss_display = self.sess.run((self.update_step, self.loss), feed_dict={self.q_target: reward,
                                                    self.state_input: states,
                                                    self.action_input: actions})
 
@@ -268,8 +275,8 @@ class DDPG:
 
         self.critic.update(rewards, states, actions)
 
-        #actions_new = self.actor.get_actions(states)
-        q_grads = self.critic.get_act_grads(states, actions)
+        actions_new = self.actor.get_actions(states)
+        q_grads = self.critic.get_act_grads(states, actions_new)
         self.actor.apply_grads(q_grads, states, rewards)
 
         self.actor.update_target()
@@ -289,7 +296,37 @@ class DDPG:
         self.train()
 
         if self.gs % self.test_verbose == self.test_verbose - 1:
-            self.write_summary(states, actions)
+            self.write_summary(states, actions, rewards)
+        if self.gs % self.save_model_every == self.save_model_every - 1:
+            self.save_model()
+
+    def train_critic(self):
+        self.gs += 1
+        train_batch = np.array(self.buffer.sample(self.bs))
+        states = np.array(train_batch[:, 0].tolist())
+        actions = np.array(train_batch[:, 1].tolist())
+        rewards = train_batch[:, 2].reshape((-1, 1))
+
+        self.critic.update(rewards, states, actions)
+        self.critic.update_target()
+
+        if self.gs % self.test_verbose == self.test_verbose - 1:
+            self.write_summary(states, actions, rewards)
+        if self.gs % self.save_model_every == self.save_model_every - 1:
+            self.save_model()
+
+    def train_actor(self):
+        self.gs += 1
+        train_batch = np.array(self.buffer.sample(self.bs))
+        states = np.array(train_batch[:, 0].tolist())
+        # actions = np.array(train_batch[:, 1].tolist())
+        rewards = train_batch[:, 2].reshape((-1, 1))
+
+        new_actions = self.actor.get_actions(states)
+        grads = self.critic.get_act_grads(states, new_actions)
+        self.actor.apply_grads(grads, states, rewards)
+        if self.gs % self.test_verbose == self.test_verbose - 1:
+            self.write_summary(states, new_actions, rewards)
         if self.gs % self.save_model_every == self.save_model_every - 1:
             self.save_model()
 
@@ -299,9 +336,11 @@ class DDPG:
     def load_model(self):
         self.saver.restore(self.sess, self.savedir)
 
-    def write_summary(self, states, acts):
+    def write_summary(self, states, acts, rewards):
         # TODO: add grad split to visualize individual grad behaviour
-        s = self.sess.run(self.__summary, feed_dict={self.critic.action_input:acts, self.critic.state_input:states})
+        s = self.sess.run(self.__summary, feed_dict={self.critic.action_input:acts,
+                                                     self.critic.state_input:states,
+                                                     self.critic.q_target:rewards.reshape((-1, 1))})
         self.summary_writer.add_summary(s, self.gs)
 
 
