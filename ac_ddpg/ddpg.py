@@ -95,14 +95,13 @@ class Actor(Network):
                 w1 = tf.get_variable('w', (self.state_dim, l1_size))
                 b1 = tf.Variable(tf.zeros((l1_size,)), name='b')
             with tf.variable_scope('l2'):
-                w2 = tf.get_variable('w', (l1_size, l2_size))
-                b2 = tf.Variable(tf.zeros((l2_size,)), name='b')
+                cell = tf.contrib.rnn.LSTMCell(l2_size)
             with tf.variable_scope('output', reuse=tf.AUTO_REUSE):
                 w3 = tf.get_variable('w', (l2_size, self.act_dim))
                 b3 = tf.Variable(tf.zeros((self.act_dim,)), name='b')
 
             l1 = tf.nn.elu(tf.matmul(inp, w1) + b1)
-            l2 = tf.nn.elu(tf.matmul(l1, w2) + b2)
+            l2 = tf.nn.dynamic_rnn(cell, l1)
             out_actions = tf.nn.sigmoid(tf.matmul(l2, w3) + b3, name='out_actions')
 
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
