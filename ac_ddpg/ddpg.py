@@ -101,8 +101,8 @@ class Actor(Network):
                 w3 = tf.get_variable('w', (l2_size, self.act_dim))
                 b3 = tf.Variable(tf.zeros((self.act_dim,)), name='b')
 
-            l1 = tf.nn.relu(tf.matmul(inp, w1) + b1)
-            l2 = tf.nn.relu(tf.matmul(l1, w2) + b2)
+            l1 = tf.nn.elu(tf.matmul(inp, w1) + b1)
+            l2 = tf.nn.elu(tf.matmul(l1, w2) + b2)
             out_actions = tf.nn.sigmoid(tf.matmul(l2, w3) + b3, name='out_actions')
 
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
@@ -115,8 +115,8 @@ class Actor(Network):
             target_upd = ema.apply(self.vars)
             target_vars = [ema.average(x) for x in self.vars]
 
-            l1 = tf.nn.relu(tf.matmul(state_in, target_vars[0]) + target_vars[1])
-            l2 = tf.nn.relu(tf.matmul(l1, target_vars[2]) + target_vars[3])
+            l1 = tf.nn.elu(tf.matmul(state_in, target_vars[0]) + target_vars[1])
+            l2 = tf.nn.elu(tf.matmul(l1, target_vars[2]) + target_vars[3])
             out = tf.nn.sigmoid(tf.matmul(l2, target_vars[4]) + target_vars[5])
 
         return state_in, out, target_upd, target_vars
@@ -126,7 +126,7 @@ class Actor(Network):
 
     def create_updater(self, lr):
         q_grad_inp = tf.placeholder(tf.float32, [None, self.act_dim], name='q_grad_in')
-        net_grads = tf.gradients(self.actions, self.vars, q_grad_inp, name='q_grads')
+        net_grads = tf.gradients(self.actions, self.vars, -q_grad_inp, name='q_grads')
         opt_step = tf.train.AdamOptimizer(lr).apply_gradients(zip(net_grads, self.vars))
         return q_grad_inp, opt_step
 
@@ -181,8 +181,8 @@ class Critic(Network):
                 w3 = tf.get_variable('w3', (l2_size, 1))
                 b3 = tf.Variable(tf.zeros([1, ]), name='b')
 
-            l1 = tf.nn.relu(tf.matmul(state_inp, w1) + b1)
-            l2 = tf.nn.relu(tf.matmul(l1, w2) + tf.matmul(action_input, w2_act) + b2)
+            l1 = tf.nn.elu(tf.matmul(state_inp, w1) + b1)
+            l2 = tf.nn.elu(tf.matmul(l1, w2) + tf.matmul(action_input, w2_act) + b2)
             q_value = tf.identity(tf.matmul(l2, w3) + b3, name='q_value')
 
         net = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=self.name)
@@ -196,8 +196,8 @@ class Critic(Network):
             target_upd = ema.apply(self.vars)
             target_vars = [ema.average(x) for x in self.vars]
 
-            l1 = tf.nn.relu(tf.matmul(state_in, target_vars[0]) + target_vars[1])
-            l2 = tf.nn.relu(tf.matmul(l1, target_vars[2]) + tf.matmul(act_in, target_vars[3]) + target_vars[4])
+            l1 = tf.nn.elu(tf.matmul(state_in, target_vars[0]) + target_vars[1])
+            l2 = tf.nn.elu(tf.matmul(l1, target_vars[2]) + tf.matmul(act_in, target_vars[3]) + target_vars[4])
             out = tf.identity(tf.matmul(l2, target_vars[5]) + target_vars[6])
 
         return state_in, act_in, out, target_upd, target_vars
@@ -209,7 +209,8 @@ class Critic(Network):
         q_target = tf.placeholder(tf.float32, [None, 1], name='q_target')
         loss = tf.reduce_mean(tf.square(q_target - self.q_value), name='critic_loss')
         tf.summary.scalar('critic_loss', loss)
-        action_gradients = tf.gradients(self.q_value, self.action_input, name='action_grads')
+        action_gradients = tf.gradients(tf.abs(self.q_value), self.action_input, name='action_grads')  # Added tf.abs()
+        # mb make a ema for grads?
         tf.summary.histogram('action_grads', action_gradients)
         update_step = tf.train.AdamOptimizer(lr).minimize(loss)
         return q_target, loss, action_gradients, update_step
@@ -229,7 +230,7 @@ class Critic(Network):
 
     def get_act_grads(self, states, actions):
         return self.sess.run(self.action_grads, feed_dict={self.state_input: states,
-                                                           self.action_input: actions}) * np.clip(np.mean(actions, axis=0),1e-6, 1.)
+                                                           self.action_input: actions})
 
 
 class DDPG:
